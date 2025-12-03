@@ -1,346 +1,332 @@
-#!/usr/bin/env python3
-import os
 import sys
-import cv2
+import os
 import time
-from datetime import datetime
 
+import cv2
 from PyQt5 import QtCore, QtGui, QtWidgets
 
-# Import your measurement function
-import outline  # outline.py must be in the same directory
+# ---------------------------------------------------------------------
+# Prevent outline.py from auto-running its CLI on import
+# ---------------------------------------------------------------------
+_original_argv = list(sys.argv)
+sys.argv = [sys.argv[0], "--test", "NONE"]
+import outline  # this will NOT run the default D638 test now
+sys.argv = _original_argv
+
+from outline import measure, Material
+
+# ---------------------------------------------------------------------
+# Paths / config
+# ---------------------------------------------------------------------
+
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+
+# outline.measure expects image_name relative to ./images
+IMAGES_DIR = os.path.join(BASE_DIR, "images")
+os.makedirs(IMAGES_DIR, exist_ok=True)
+
+# outline saves to ./outputs
+OUT_DIR = os.path.join(BASE_DIR, "outputs")
+os.makedirs(OUT_DIR, exist_ok=True)
+
+CAM_INDEX_TOP = 0   # top-down USB camera
+CAM_INDEX_SIDE = 1  # side USB camera
 
 
-CAPTURE_DIR = "captures"
-os.makedirs(CAPTURE_DIR, exist_ok=True)
-
-# Which camera index is "top-down" / primary?
-PRIMARY_CAM_INDEX = 0
-SECONDARY_CAM_INDEX = 1
-
-# Approx Tinius Olsen teal-ish accent
-TIN_TEAL = "#00656B"
-TIN_DARK = "#101820"
-TIN_LIGHT_BG = "#F5F7FA"
-
+# ---------------------------------------------------------------------
+# Worker thread for running measure() so GUI does not freeze
+# ---------------------------------------------------------------------
 
 class MeasureWorker(QtCore.QObject):
-    """
-    Worker run in a separate thread to call outline.measure(image_path)
-    so the GUI doesn't freeze during processing.
-    """
-    finished = QtCore.pyqtSignal(dict, str)  # metrics, outline_path
-    error = QtCore.pyqtSignal(str)
+    finished = QtCore.pyqtSignal(dict, str)   # metrics, outline_path
+    failed = QtCore.pyqtSignal(str)
 
-    def __init__(self, image_path: str):
+    def __init__(self, image_name: str, material: Material):
         super().__init__()
-        self.image_path = image_path
+        self.image_name = image_name
+        self.material = material
 
     @QtCore.pyqtSlot()
     def run(self):
         try:
-            metrics = outline.measure(self.image_path)
+            # Call outline.measure(image_name, material)
+            metrics = measure(self.image_name, self.material)
 
-            # Try to find an outline image path from metrics, else assume "outline.png"
-            outline_path = metrics.get("outline_path")
-            if not outline_path:
-                # fallback: same directory as outline.py or current working dir
-                # adjust if your outline.py uses a different convention
-                possible = [
-                    os.path.join(os.path.dirname(self.image_path), "outline.png"),
-                    "outline.png",
-                ]
-                outline_path = None
-                for p in possible:
-                    if os.path.exists(p):
-                        outline_path = p
-                        break
-            if not outline_path:
-                outline_path = ""  # will be handled on GUI side
+            base = os.path.splitext(os.path.basename(self.image_name))[0]
+            outline_path = os.path.join(OUT_DIR, f"{base}_outline.png")
+            if not os.path.exists(outline_path):
+                # outline.py *should* have written this; if not, complain
+                raise FileNotFoundError(f"Expected outline image not found: {outline_path}")
 
             self.finished.emit(metrics, outline_path)
         except Exception as e:
-            self.error.emit(str(e))
+            self.failed.emit(str(e))
 
 
-class CameraWidget(QtWidgets.QLabel):
-    """
-    Simple QLabel that shows frames from an OpenCV VideoCapture.
-    """
+# ---------------------------------------------------------------------
+# Main GUI
+# ---------------------------------------------------------------------
 
-    def __init__(self, cap_index: int, parent=None):
-        super().__init__(parent)
-        self.cap_index = cap_index
-        self.cap = cv2.VideoCapture(self.cap_index)
-        # Set a reasonable resolution; adjust as needed
-        self.cap.set(cv2.CAP_PROP_FRAME_WIDTH,  1280)
-        self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 720)
-        self.setAlignment(QtCore.Qt.AlignCenter)
-        self.setMinimumSize(400, 300)
-        self.setStyleSheet("background-color: #222; border: 1px solid #444;")
-
-    def read_frame(self):
-        if not self.cap or not self.cap.isOpened():
-            return None
-        ret, frame = self.cap.read()
-        if not ret:
-            return None
-        return frame
-
-    def update_view(self):
-        frame = self.read_frame()
-        if frame is None:
-            return
-        # Convert BGR to RGB
-        rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-        h, w, ch = rgb.shape
-        bytes_per_line = ch * w
-        qimg = QtGui.QImage(rgb.data, w, h, bytes_per_line, QtGui.QImage.Format_RGB888)
-        pix = QtGui.QPixmap.fromImage(qimg)
-        # Scale to label size while keeping aspect ratio
-        self.setPixmap(pix.scaled(self.size(), QtCore.Qt.KeepAspectRatio, QtCore.Qt.SmoothTransformation))
-
-    def close(self):
-        if self.cap is not None:
-            try:
-                self.cap.release()
-            except Exception:
-                pass
-        super().close()
-
-    def grab_current_frame(self):
-        """
-        Return the latest BGR frame (non-resized) for saving/processing.
-        """
-        frame = self.read_frame()
-        return frame
-
-
-class TiniusMainWindow(QtWidgets.QWidget):
+class TiniusGui(QtWidgets.QWidget):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("Tinius Olsen - Specimen Measurement")
-        self.resize(1600, 900)
 
-        # Global style
-        self.setStyleSheet(f"""
-            QWidget {{
-                background-color: {TIN_LIGHT_BG};
-                color: {TIN_DARK};
-                font-family: Arial, Helvetica, sans-serif;
-            }}
-            QPushButton {{
-                background-color: {TIN_TEAL};
-                color: white;
-                border-radius: 4px;
-                padding: 8px 16px;
-                font-weight: bold;
-            }}
-            QPushButton:disabled {{
-                background-color: #7a8a8c;
-            }}
-            QPlainTextEdit {{
-                background-color: white;
-                border: 1px solid #aaa;
-            }}
-        """)
+        self.setWindowTitle("Tinius Olsen Specimen Measurement")
+        self.resize(1400, 900)
+        self.setStyleSheet("background-color: #f3f5f7;")
 
-        # --- Header / logo bar ---
-        header = QtWidgets.QFrame()
-        header.setFixedHeight(70)
-        header.setStyleSheet(f"background-color: {TIN_DARK}; color: white;")
+        # Cameras
+        self.cam_top = cv2.VideoCapture(CAM_INDEX_TOP)
+        self.cam_side = cv2.VideoCapture(CAM_INDEX_SIDE)
 
-        logo_label = QtWidgets.QLabel("Tinius Olsen")
-        logo_font = QtGui.QFont("Arial", 20, QtGui.QFont.Bold)
-        logo_label.setFont(logo_font)
-        logo_label.setStyleSheet("color: white;")
+        # If a cam fails, do not crash; we just show blank
+        if not self.cam_top.isOpened():
+            print("WARNING: could not open camera index 0 (top).")
+        if not self.cam_side.isOpened():
+            print("WARNING: could not open camera index 1 (side).")
 
-        subtitle_label = QtWidgets.QLabel("Universal Testing Machine - Vision Measurement")
-        subtitle_label.setStyleSheet("color: #cfd8dc;")
-        subtitle_font = QtGui.QFont("Arial", 11)
-        subtitle_label.setFont(subtitle_font)
+        self.last_frame_top = None
+        self.last_frame_side = None
 
-        header_layout = QtWidgets.QVBoxLayout(header)
-        header_layout.setContentsMargins(20, 8, 20, 8)
-        header_layout.addWidget(logo_label, alignment=QtCore.Qt.AlignLeft | QtCore.Qt.AlignVCenter)
-        header_layout.addWidget(subtitle_label, alignment=QtCore.Qt.AlignLeft | QtCore.Qt.AlignTop)
+        # Live view labels
+        self.label_top = QtWidgets.QLabel("Top Camera")
+        self.label_side = QtWidgets.QLabel("Side Camera")
 
-        # --- Cameras ---
-        self.cam_primary = CameraWidget(PRIMARY_CAM_INDEX)
-        self.cam_secondary = CameraWidget(SECONDARY_CAM_INDEX)
+        common_cam_style = (
+            "background-color: #222; color: #ddd; "
+            "border-radius: 8px; border: 1px solid #444;"
+        )
+        for lab in (self.label_top, self.label_side):
+            lab.setAlignment(QtCore.Qt.AlignCenter)
+            lab.setMinimumSize(480, 360)
+            lab.setStyleSheet(common_cam_style)
 
-        cameras_frame = QtWidgets.QFrame()
-        cams_layout = QtWidgets.QHBoxLayout(cameras_frame)
-        cams_layout.setContentsMargins(10, 10, 10, 10)
-        cams_layout.setSpacing(10)
-        cams_layout.addWidget(self.cam_primary, stretch=1)
-        cams_layout.addWidget(self.cam_secondary, stretch=1)
+        # Outline preview
+        self.label_outline = QtWidgets.QLabel("Outline preview")
+        self.label_outline.setAlignment(QtCore.Qt.AlignCenter)
+        self.label_outline.setMinimumSize(640, 360)
+        self.label_outline.setStyleSheet(common_cam_style)
 
-        # --- Capture & status controls ---
-        self.btn_capture = QtWidgets.QPushButton("Capture & Measure (Primary Camera)")
-        self.btn_capture.clicked.connect(self.on_capture)
+        # Metrics panel
+        self.metrics_label = QtWidgets.QLabel("Measurements")
+        self.metrics_label.setStyleSheet(
+            "font-size: 18px; font-weight: 600; color: #222;"
+        )
 
-        self.status_label = QtWidgets.QLabel("Ready.")
-        self.status_label.setStyleSheet(f"color: {TIN_DARK};")
-
-        ctrl_layout = QtWidgets.QHBoxLayout()
-        ctrl_layout.setContentsMargins(10, 0, 10, 0)
-        ctrl_layout.addWidget(self.btn_capture)
-        ctrl_layout.addStretch(1)
-        ctrl_layout.addWidget(self.status_label)
-
-        # --- Outline display ---
-        self.outline_label = QtWidgets.QLabel()
-        self.outline_label.setAlignment(QtCore.Qt.AlignCenter)
-        self.outline_label.setMinimumSize(400, 300)
-        self.outline_label.setStyleSheet("background-color: #ffffff; border: 1px solid #aaaaaa;")
-
-        outline_title = QtWidgets.QLabel("Outline")
-        outline_title.setAlignment(QtCore.Qt.AlignLeft)
-        outline_title.setStyleSheet(f"color: {TIN_DARK}; font-weight: bold;")
-
-        outline_layout = QtWidgets.QVBoxLayout()
-        outline_layout.addWidget(outline_title)
-        outline_layout.addWidget(self.outline_label, stretch=1)
-
-        # --- Metrics / data display ---
-        metrics_title = QtWidgets.QLabel("Measurement Data")
-        metrics_title.setAlignment(QtCore.Qt.AlignLeft)
-        metrics_title.setStyleSheet(f"color: {TIN_DARK}; font-weight: bold;")
-
-        self.metrics_text = QtWidgets.QPlainTextEdit()
+        self.metrics_text = QtWidgets.QTextEdit()
         self.metrics_text.setReadOnly(True)
-        self.metrics_text.setMinimumWidth(380)
+        self.metrics_text.setStyleSheet(
+            "background-color: #ffffff; border-radius: 8px; "
+            "border: 1px solid #ccc; font-family: 'Consolas', monospace; "
+            "font-size: 13px;"
+        )
 
-        metrics_layout = QtWidgets.QVBoxLayout()
-        metrics_layout.addWidget(metrics_title)
-        metrics_layout.addWidget(self.metrics_text, stretch=1)
+        # Material selection (rough)
+        self.material_combo = QtWidgets.QComboBox()
+        self.material_combo.addItems(["Metal", "Plastic"])
+        self.material_combo.setStyleSheet(
+            "background-color: #ffffff; border-radius: 6px; "
+            "border: 1px solid #aaa; padding: 3px; font-size: 13px;"
+        )
 
-        # Bottom pane: outline on left, metrics on right
-        bottom_frame = QtWidgets.QFrame()
-        bottom_layout = QtWidgets.QHBoxLayout(bottom_frame)
-        bottom_layout.setContentsMargins(10, 10, 10, 10)
-        bottom_layout.setSpacing(10)
-        bottom_layout.addLayout(outline_layout, stretch=3)
-        bottom_layout.addLayout(metrics_layout, stretch=2)
+        # Measure button
+        self.btn_capture = QtWidgets.QPushButton("Capture & Measure")
+        self.btn_capture.setFixedHeight(40)
+        self.btn_capture.setStyleSheet(
+            "background-color: #0067a6; color: white; "
+            "border-radius: 8px; font-size: 16px; font-weight: 600;"
+        )
+        self.btn_capture.clicked.connect(self.capture_and_measure)
 
-        # Main layout
+        # Status label
+        self.status_label = QtWidgets.QLabel("Ready")
+        self.status_label.setStyleSheet("color: #555; font-size: 13px;")
+
+        # Logo / company branding
+        self.logo_label = QtWidgets.QLabel("Tinius Olsen")
+        self.logo_label.setAlignment(QtCore.Qt.AlignLeft | QtCore.Qt.AlignVCenter)
+        self.logo_label.setStyleSheet(
+            "font-family: 'Arial'; font-weight: 700; font-size: 26px; "
+            "letter-spacing: 3px; color: #004b63;"
+        )
+
+        self.tagline_label = QtWidgets.QLabel("Testing Machines & Instruments")
+        self.tagline_label.setStyleSheet(
+            "color: #666; font-size: 11px; font-style: italic;"
+        )
+
+        # ---- Layout ----
+        header_layout = QtWidgets.QVBoxLayout()
+        header_layout.addWidget(self.logo_label)
+        header_layout.addWidget(self.tagline_label)
+        header_layout.setSpacing(0)
+
+        top_bar = QtWidgets.QHBoxLayout()
+        top_bar.addLayout(header_layout)
+        top_bar.addStretch(1)
+
+        cams_layout = QtWidgets.QHBoxLayout()
+        cams_layout.addWidget(self.label_top, 1)
+        cams_layout.addWidget(self.label_side, 1)
+
+        metrics_controls = QtWidgets.QVBoxLayout()
+        metrics_controls.addWidget(self.metrics_label)
+        metrics_controls.addWidget(self.metrics_text, 3)
+
+        controls_row = QtWidgets.QHBoxLayout()
+        controls_row.addWidget(QtWidgets.QLabel("Material:"))
+        controls_row.addWidget(self.material_combo)
+        controls_row.addStretch(1)
+        controls_row.addWidget(self.btn_capture)
+
+        metrics_controls.addLayout(controls_row)
+        metrics_controls.addWidget(self.status_label)
+
+        bottom_layout = QtWidgets.QHBoxLayout()
+        bottom_layout.addWidget(self.label_outline, 3)
+        bottom_layout.addLayout(metrics_controls, 2)
+
         main_layout = QtWidgets.QVBoxLayout(self)
-        main_layout.setContentsMargins(0, 0, 0, 0)
-        main_layout.setSpacing(0)
-        main_layout.addWidget(header)
-        main_layout.addWidget(cameras_frame, stretch=3)
-        main_layout.addLayout(ctrl_layout)
-        main_layout.addWidget(bottom_frame, stretch=3)
+        main_layout.addLayout(top_bar)
+        main_layout.addSpacing(10)
+        main_layout.addLayout(cams_layout)
+        main_layout.addSpacing(10)
+        main_layout.addLayout(bottom_layout)
 
-        # Timer to refresh camera views
+        # Timer to refresh camera frames
         self.timer = QtCore.QTimer(self)
-        self.timer.timeout.connect(self.update_cameras)
-        self.timer.start(40)  # ~25 fps
+        self.timer.timeout.connect(self.update_frames)
+        self.timer.start(33)  # ~30 FPS
 
-        # Thread holder
-        self.measure_thread = None
-        self.measure_worker = None
+        # Thread / worker handles
+        self.worker_thread = None
+        self.worker = None
 
-    # -------- Camera refresh --------
-    def update_cameras(self):
-        self.cam_primary.update_view()
-        self.cam_secondary.update_view()
+    # ------------------------------------------------------------------
+    # Camera handling
+    # ------------------------------------------------------------------
 
-    # -------- Capture & measure --------
-    def on_capture(self):
-        self.btn_capture.setEnabled(False)
-        self.status_label.setText("Capturing image...")
+    def update_frames(self):
+        self._update_single_cam(self.cam_top, self.label_top, "Top Camera", is_top=True)
+        self._update_single_cam(self.cam_side, self.label_side, "Side Camera", is_top=False)
 
-        frame = self.cam_primary.grab_current_frame()
-        if frame is None:
-            self.status_label.setText("Error: primary camera frame not available.")
-            self.btn_capture.setEnabled(True)
+    def _update_single_cam(self, cam, label, placeholder, is_top: bool):
+        if cam is None or not cam.isOpened():
+            return
+        ret, frame = cam.read()
+        if not ret:
             return
 
-        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-        img_path = os.path.join(CAPTURE_DIR, f"specimen_{ts}.jpg")
-        cv2.imwrite(img_path, frame)
+        if is_top:
+            self.last_frame_top = frame
+        else:
+            self.last_frame_side = frame
 
-        self.status_label.setText("Processing image in outline.measure()...")
-        self.metrics_text.setPlainText(f"Processing {os.path.basename(img_path)}...")
+        frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+        h, w, ch = frame_rgb.shape
+        bytes_per_line = ch * w
+        qimg = QtGui.QImage(
+            frame_rgb.data, w, h, bytes_per_line, QtGui.QImage.Format_RGB888
+        )
+        pix = QtGui.QPixmap.fromImage(qimg)
+        pix = pix.scaled(label.width(), label.height(),
+                         QtCore.Qt.KeepAspectRatio,
+                         QtCore.Qt.SmoothTransformation)
+        label.setPixmap(pix)
 
-        # Background worker
-        self.measure_thread = QtCore.QThread()
-        self.measure_worker = MeasureWorker(img_path)
-        self.measure_worker.moveToThread(self.measure_thread)
-        self.measure_thread.started.connect(self.measure_worker.run)
-        self.measure_worker.finished.connect(self.on_measure_finished)
-        self.measure_worker.error.connect(self.on_measure_error)
-        self.measure_worker.finished.connect(self.measure_thread.quit)
-        self.measure_worker.error.connect(self.measure_thread.quit)
-        self.measure_worker.finished.connect(self.measure_worker.deleteLater)
-        self.measure_worker.error.connect(self.measure_worker.deleteLater)
-        self.measure_thread.finished.connect(self.measure_thread.deleteLater)
-        self.measure_thread.start()
+    # ------------------------------------------------------------------
+    # Capture + measurement
+    # ------------------------------------------------------------------
+
+    def capture_and_measure(self):
+        if self.last_frame_top is None:
+            self.status_label.setText("No frame from top camera yet.")
+            return
+
+        # Save image into ./images and pass only filename to outline.measure()
+        timestamp = int(time.time())
+        filename = f"specimen_{timestamp}.jpg"
+        img_path = os.path.join(IMAGES_DIR, filename)
+
+        try:
+            # OpenCV expects BGR
+            cv2.imwrite(img_path, self.last_frame_top)
+        except Exception as e:
+            self.status_label.setText(f"Failed to save image: {e}")
+            return
+
+        # Decide material enum from combo box
+        material_text = self.material_combo.currentText().lower()
+        material_enum = Material.METAL if "metal" in material_text else Material.PLASTIC
+
+        self.status_label.setText("Measuring...")
+        self.btn_capture.setEnabled(False)
+
+        # Launch worker thread
+        self.worker_thread = QtCore.QThread()
+        self.worker = MeasureWorker(filename, material_enum)
+        self.worker.moveToThread(self.worker_thread)
+
+        self.worker_thread.started.connect(self.worker.run)
+        self.worker.finished.connect(self.on_measure_finished)
+        self.worker.failed.connect(self.on_measure_failed)
+
+        # Clean up
+        self.worker.finished.connect(self.worker_thread.quit)
+        self.worker.failed.connect(self.worker_thread.quit)
+        self.worker.finished.connect(self.worker.deleteLater)
+        self.worker.failed.connect(self.worker.deleteLater)
+        self.worker_thread.finished.connect(self.worker_thread.deleteLater)
+
+        self.worker_thread.start()
 
     @QtCore.pyqtSlot(dict, str)
     def on_measure_finished(self, metrics: dict, outline_path: str):
-        # Update outline image
-        if outline_path and os.path.exists(outline_path):
+        # Show outline image
+        if os.path.exists(outline_path):
             pix = QtGui.QPixmap(outline_path)
-            self.outline_label.setPixmap(
-                pix.scaled(self.outline_label.size(),
-                           QtCore.Qt.KeepAspectRatio,
-                           QtCore.Qt.SmoothTransformation)
-            )
+            pix = pix.scaled(self.label_outline.width(),
+                             self.label_outline.height(),
+                             QtCore.Qt.KeepAspectRatio,
+                             QtCore.Qt.SmoothTransformation)
+            self.label_outline.setPixmap(pix)
         else:
-            self.outline_label.setText("Outline image not found.")
+            self.label_outline.setText("Outline image not found.")
 
-        # Format metrics nicely
+        # Dump metrics nicely
         lines = []
-        def add(label, key):
-            if key in metrics:
-                lines.append(f"{label}: {metrics[key]}")
-
-        add("ASTM standard", "astm_standard")
-        add("Inferred shape", "shape")
-        add("Length (mm)", "length")
-        add("Max width (mm)", "width")
-        add("Neck width (mm)", "neck_width")
-        add("Surface area (mm^2)", "surface_area")
-        add("Pixels per mm", "ppmm")
-        add("Material (NN)", "nn_material")
-        add("NN material confidence", "nn_material_confidence")
-        add("NN material votes", "nn_material_votes")
-
-        if not lines:
-            lines.append("No metrics returned from outline.measure().")
-
+        for k, v in metrics.items():
+            lines.append(f"{k:20s}: {v}")
         self.metrics_text.setPlainText("\n".join(lines))
 
-        self.status_label.setText("Done.")
+        self.status_label.setText("Measurement complete.")
         self.btn_capture.setEnabled(True)
 
     @QtCore.pyqtSlot(str)
-    def on_measure_error(self, msg: str):
-        self.metrics_text.setPlainText(f"Error during measurement:\n{msg}")
-        self.status_label.setText("Error.")
+    def on_measure_failed(self, msg: str):
+        self.status_label.setText(f"Error during measurement: {msg}")
         self.btn_capture.setEnabled(True)
 
-    # -------- Cleanup --------
-    def closeEvent(self, event):
-        try:
-            self.timer.stop()
-        except Exception:
-            pass
-        try:
-            self.cam_primary.close()
-            self.cam_secondary.close()
-        except Exception:
-            pass
-        super().closeEvent(event)
+    # ------------------------------------------------------------------
+    # Cleanup
+    # ------------------------------------------------------------------
 
+    def closeEvent(self, event):
+        if self.cam_top is not None:
+            self.cam_top.release()
+        if self.cam_side is not None:
+            self.cam_side.release()
+        return super().closeEvent(event)
+
+
+# ---------------------------------------------------------------------
+# Entry point
+# ---------------------------------------------------------------------
 
 def main():
     app = QtWidgets.QApplication(sys.argv)
-    win = TiniusMainWindow()
-    win.show()
+    gui = TiniusGui()
+    gui.show()
     sys.exit(app.exec_())
 
 
