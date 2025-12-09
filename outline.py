@@ -22,6 +22,7 @@ import torch.nn.functional as F
 class Material(Enum):
     PLASTIC = 0
     METAL = 1
+    UNKNOWN = 2
 
 
 class Shape(Enum):
@@ -135,6 +136,15 @@ def get_image_names():
             files.append(item)
     return files
 
+def get_capture_names():
+    relative_path = "./captures/"
+
+    files = []
+    for item in os.listdir(relative_path):
+        full_path = os.path.join(relative_path, item)
+        if os.path.isfile(full_path):
+            files.append(item)
+    return files
 
 def pil_to_bgr(pil_img: Image.Image):
     return cv2.cvtColor(np.array(pil_img.convert("RGB")), cv2.COLOR_RGB2BGR)
@@ -235,15 +245,15 @@ def annotate(img_bgr: np.ndarray, cnt: np.ndarray, scale_label: str) -> np.ndarr
 # ------------------------------------------------------------------
 
 # Calibration at ORIGINAL camera size
-PPMM_CAMERA = 18.5           # pixels per mm at calibration camera width
-PPMM_CAMERA_AT_WIDTH = 2592  # camera width used for that ppmm
+PPMM_CAMERA = 3.7           # pixels per mm at calibration camera width
+PPMM_CAMERA_AT_WIDTH = 640  # camera width used for that ppmm
 PPMM_FORCE: Optional[float] = None
 
 CENTER_MIN = 0.40
 CENTER_MAX = 0.60
 
 
-def infer_shape(width: float, neck_width: float, width_tol: float = 0.10) -> Optional[Shape]:
+def infer_shape(width: float, neck_width: float, width_tol: float = 0.20) -> Optional[Shape]:
     if width <= 0:
         return None
     return Shape.COUPON if (neck_width / width) >= (1 - width_tol) else Shape.DOGBONE
@@ -413,7 +423,7 @@ def classify_material_from_patches(
 
     if MODEL is None or LABEL_MAP_INT is None:
         # Model not available
-        return "UNKNOWN", 0.0, {}
+        return Material.UNKNOWN, 0.0, {}
 
     H, W = contour_mask.shape[:2]
     pad = patch_size // 2
@@ -437,7 +447,7 @@ def classify_material_from_patches(
 
     if not valid_coords:
         print("WARNING: no valid centers for patch sampling.")
-        return "UNKNOWN", 0.0, {}
+        return Material.UNKNOWN, 0.0, {}
 
     # Shuffle and pick up to n_patches
     rng = np.random.default_rng()
@@ -469,15 +479,17 @@ def classify_material_from_patches(
         total += 1
 
     if total == 0 or not votes:
-        return "UNKNOWN", 0.0, {}
+        return Material.UNKNOWN, 0.0, {}
 
     # Majority vote
     majority_idx = max(votes, key=votes.get)
     majority_count = votes[majority_idx]
     confidence = majority_count / total
     label_str = LABEL_MAP_INT.get(majority_idx, f"CLASS_{majority_idx}")
+    
+    material_label = (Material.METAL if label_str == "METAL" else Material.PLASTIC)
 
-    return label_str, confidence, votes
+    return material_label, confidence, votes
 
 def astm_standard(
     material: Material,
@@ -501,16 +513,16 @@ def astm_standard(
 
     # Normalize shape string just in case
     shape_norm = (shape or "").upper()
+    
+    # Rectangular / coupon-shaped plastic -> flexural per ASTM D790
+    if shape_norm == "COUPON":
+        return "ASTM D790 (flexural, plastics)"
 
     # ---- Plastics path ----
     if material == Material.PLASTIC:
         # Dogbone-shaped plastic -> tensile per ASTM D638
         if shape_norm == "DOGBONE":
             return "ASTM D638 (tensile, plastics)"
-
-        # Rectangular / coupon-shaped plastic -> flexural per ASTM D790
-        if shape_norm == "COUPON":
-            return "ASTM D790 (flexural, plastics)"
 
         # Fallback if shape somehow unknown
         return "ASTM D638/D790 (plastic specimen)"
@@ -535,7 +547,7 @@ def astm_standard(
 # ------------------------------------------------------------------
 
 
-def measure(image_name: str, material: Material):
+def measure(image_name: str):
     """
     - Uses outline.py's segmentation & outline rendering.
     - Uses roboflow_outline.py's measurement logic (length / width / neck_width / area).
@@ -547,8 +559,8 @@ def measure(image_name: str, material: Material):
     """
     # Toggle rembg if needed
     no_rembg = False
-
-    image_path = os.path.join("images", image_name)
+    
+    image_path = image_name
     pil = Image.open(image_path).convert("RGB")
     img_rgb = np.array(pil)
     img_bgr = pil_to_bgr(pil)
@@ -574,9 +586,6 @@ def measure(image_name: str, material: Material):
     shape = metrics["shape"]
     ppmm = metrics["ppmm"]
 
-    # guess ASTM standard from material, shape, and dimensions
-    astm_guess = astm_standard(material, shape, length_mm, width_mm, neck_mm)
-
     scale_label = f"{ppmm:.3f} px/mm"
 
     # images
@@ -596,6 +605,9 @@ def measure(image_name: str, material: Material):
     nn_label, nn_conf, nn_votes = classify_material_from_patches(
         img_rgb, contour_mask, n_patches=100, patch_size=16
     )
+    
+    # guess ASTM standard from material, shape, and dimensions
+    astm_guess = astm_standard(nn_label, shape, length_mm, width_mm, neck_mm)
 
     # Print to stdout
     print(f"\n=== {image_name} ===")
@@ -605,12 +617,11 @@ def measure(image_name: str, material: Material):
     print(f"Neck width (mm):    {neck_mm}")
     print(f"Surface area (mm^2): {area_mm2}")
     print(f"Inferred shape:     {shape}")
-    print(f"Ground-truth material (from name): {material.name}")
     print(f"ASTM standard guess: {astm_guess}")
 
     if nn_label != "UNKNOWN":
         print(
-            f"NN material prediction: {nn_label} "
+            f"NN material prediction: {nn_label.name} "
             f"({nn_conf * 100:.1f}% of sampled patches, votes={nn_votes})"
         )
     else:
@@ -621,7 +632,7 @@ def measure(image_name: str, material: Material):
     print(f"Annotation: {annotation_path}")
 
     # Add NN info into metrics dict so caller can use it programmatically
-    metrics["nn_material"] = nn_label
+    metrics["nn_material"] = ("PLASTIC" if astm_guess == "ASTM D790 (flexural, plastics)" else nn_label.name)
     metrics["nn_material_confidence"] = round(nn_conf, 3)
     metrics["nn_material_votes"] = nn_votes
     metrics["astm_standard"] = astm_guess
@@ -644,18 +655,13 @@ parser.add_argument(
 args = parser.parse_args()
 
 image_names = get_image_names()
-
-image_to_material = {}
-for image in image_names:
-    if image[0:4] == "D638" or image[0:4] == "D790":
-        image_to_material[image] = Material.PLASTIC
-    else:
-        image_to_material[image] = Material.METAL
-
-#print("Image -> material mapping:", image_to_material)
+capture_names = get_capture_names()
+print(capture_names)
 
 if args.test == "all":
     for name in image_names:
-        measure(name, image_to_material[name])
+        measure("images/" + name)
+elif args.test == "last":
+    measure("captures/" + capture_names[0])
 elif args.test in image_names:
-    measure(args.test, image_to_material[args.test])
+    measure("images/" + args.test)

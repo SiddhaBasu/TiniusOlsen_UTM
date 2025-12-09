@@ -22,7 +22,11 @@ from outline import measure, Material
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
 # outline.measure expects image_name relative to ./images
+<<<<<<< HEAD
 IMAGES_DIR = os.path.join(BASE_DIR, "images")
+=======
+IMAGES_DIR = os.path.join(BASE_DIR, "captures")
+>>>>>>> 4c78365 (New GUI code)
 os.makedirs(IMAGES_DIR, exist_ok=True)
 
 # outline saves to ./outputs
@@ -30,7 +34,11 @@ OUT_DIR = os.path.join(BASE_DIR, "outputs")
 os.makedirs(OUT_DIR, exist_ok=True)
 
 CAM_INDEX_TOP = 0   # top-down USB camera
+<<<<<<< HEAD
 CAM_INDEX_SIDE = 1  # side USB camera
+=======
+CAM_INDEX_SIDE = 2  # side USB camera
+>>>>>>> 4c78365 (New GUI code)
 
 
 # ---------------------------------------------------------------------
@@ -41,16 +49,27 @@ class MeasureWorker(QtCore.QObject):
     finished = QtCore.pyqtSignal(dict, str)   # metrics, outline_path
     failed = QtCore.pyqtSignal(str)
 
+<<<<<<< HEAD
     def __init__(self, image_name: str, material: Material):
         super().__init__()
         self.image_name = image_name
         self.material = material
+=======
+    def __init__(self, image_name: str):
+        super().__init__()
+        self.image_name = image_name
+>>>>>>> 4c78365 (New GUI code)
 
     @QtCore.pyqtSlot()
     def run(self):
         try:
+<<<<<<< HEAD
             # Call outline.measure(image_name, material)
             metrics = measure(self.image_name, self.material)
+=======
+            # Call outline.measure(image_name)
+            metrics = measure("captures/" + self.image_name)
+>>>>>>> 4c78365 (New GUI code)
 
             base = os.path.splitext(os.path.basename(self.image_name))[0]
             outline_path = os.path.join(OUT_DIR, f"{base}_outline.png")
@@ -98,7 +117,11 @@ class TiniusGui(QtWidgets.QWidget):
         )
         for lab in (self.label_top, self.label_side):
             lab.setAlignment(QtCore.Qt.AlignCenter)
+<<<<<<< HEAD
             lab.setMinimumSize(480, 360)
+=======
+            lab.setMinimumSize(640, 360)
+>>>>>>> 4c78365 (New GUI code)
             lab.setStyleSheet(common_cam_style)
 
         # Outline preview
@@ -118,6 +141,7 @@ class TiniusGui(QtWidgets.QWidget):
         self.metrics_text.setStyleSheet(
             "background-color: #ffffff; border-radius: 8px; "
             "border: 1px solid #ccc; font-family: 'Consolas', monospace; "
+<<<<<<< HEAD
             "font-size: 13px;"
         )
 
@@ -127,6 +151,9 @@ class TiniusGui(QtWidgets.QWidget):
         self.material_combo.setStyleSheet(
             "background-color: #ffffff; border-radius: 6px; "
             "border: 1px solid #aaa; padding: 3px; font-size: 13px;"
+=======
+            "font-size: 15px;"
+>>>>>>> 4c78365 (New GUI code)
         )
 
         # Measure button
@@ -171,11 +198,17 @@ class TiniusGui(QtWidgets.QWidget):
 
         metrics_controls = QtWidgets.QVBoxLayout()
         metrics_controls.addWidget(self.metrics_label)
+<<<<<<< HEAD
         metrics_controls.addWidget(self.metrics_text, 3)
 
         controls_row = QtWidgets.QHBoxLayout()
         controls_row.addWidget(QtWidgets.QLabel("Material:"))
         controls_row.addWidget(self.material_combo)
+=======
+        metrics_controls.addWidget(self.metrics_text, 15)
+
+        controls_row = QtWidgets.QHBoxLayout()
+>>>>>>> 4c78365 (New GUI code)
         controls_row.addStretch(1)
         controls_row.addWidget(self.btn_capture)
 
@@ -255,16 +288,23 @@ class TiniusGui(QtWidgets.QWidget):
             self.status_label.setText(f"Failed to save image: {e}")
             return
 
+<<<<<<< HEAD
         # Decide material enum from combo box
         material_text = self.material_combo.currentText().lower()
         material_enum = Material.METAL if "metal" in material_text else Material.PLASTIC
 
+=======
+>>>>>>> 4c78365 (New GUI code)
         self.status_label.setText("Measuring...")
         self.btn_capture.setEnabled(False)
 
         # Launch worker thread
         self.worker_thread = QtCore.QThread()
+<<<<<<< HEAD
         self.worker = MeasureWorker(filename, material_enum)
+=======
+        self.worker = MeasureWorker(filename)
+>>>>>>> 4c78365 (New GUI code)
         self.worker.moveToThread(self.worker_thread)
 
         self.worker_thread.started.connect(self.worker.run)
@@ -295,8 +335,24 @@ class TiniusGui(QtWidgets.QWidget):
 
         # Dump metrics nicely
         lines = []
+<<<<<<< HEAD
         for k, v in metrics.items():
             lines.append(f"{k:20s}: {v}")
+=======
+        metric_names = ["Length", "Width", "Neck Width", "Surface Area", "Shape", "Material", "Material Confidence", "ASTM Standard"]
+        lines.append(f"{metric_names[0]:20s}: {metrics["length"]} mm")
+        
+        if metrics["shape"] == "COUPON":
+                lines.append(f"{metric_names[1]:20s}: {metrics["neck_width"]} mm")
+        else:
+                lines.append(f"{metric_names[1]:20s}: {metrics["width"]} mm")
+                lines.append(f"{metric_names[2]:20s}: {metrics["neck_width"]} mm")
+        
+        lines.append(f"{metric_names[3]:20s}: {metrics["surface_area"]} mm^2")
+        lines.append(f"{metric_names[4]:20s}: {metrics["shape"]}")
+        lines.append(f"{metric_names[5]:20s}: {metrics["nn_material"]} with confidence {metrics["nn_material_confidence"]}")
+        lines.append(f"{metric_names[7]:20s}: {metrics["astm_standard"]}")
+>>>>>>> 4c78365 (New GUI code)
         self.metrics_text.setPlainText("\n".join(lines))
 
         self.status_label.setText("Measurement complete.")
