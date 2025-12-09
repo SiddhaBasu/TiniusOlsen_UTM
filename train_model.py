@@ -22,7 +22,7 @@ from torch.utils.data import Dataset, DataLoader, WeightedRandomSampler
 
 DATASET_PATH = "dataset/patch_dataset_2.npz"
 MODEL_DIR = "models"
-MODEL_PATH = os.path.join(MODEL_DIR, "material_cnn_2.pth")
+MODEL_PATH = os.path.join(MODEL_DIR, "material_cnn_3.pth")
 
 BATCH_SIZE = 64
 EPOCHS = 15          # small epoch count as requested
