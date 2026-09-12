@@ -2,9 +2,6 @@
 
 Penn State Learning Factory capstone (EDSGN 460W) — an automatic specimen-identification system for Tinius Olsen universal testing machines (UTMs). It replaces manual caliper/visual measurement with a camera-based pipeline that measures a specimen's dimensions, classifies its material, and reports the applicable ASTM standard.
 
-**Team:** Tong Chen (ME), Brian Toth (ME), Siddhardha Basu (CS)
-**Sponsor:** Paul Feudo, Tinius Olsen · **Advisor:** Dr. Robert Allen Kimel, MatSE
-
 ## Problem
 
 Tinius Olsen operators currently identify each test specimen's shape, dimensions, material, and ASTM standard by hand — measuring with calipers and visually inspecting the sample. This process is slow, inconsistent between operators, and prone to error. The goal of this project was to build a low-operator-input system, using ML/AI where useful, that automatically determines a specimen's dimensions, shape, material, and correct ASTM standard within a $1,250 budget and a 16-week timeline, while staying safe, intuitive, and easy to extend.
