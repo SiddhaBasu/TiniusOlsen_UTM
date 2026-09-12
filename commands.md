@@ -1,0 +1,1 @@
+python outlineandmeasure.py black_sample.jpg --use_fov --fov_deg 60 --distance_in 12
